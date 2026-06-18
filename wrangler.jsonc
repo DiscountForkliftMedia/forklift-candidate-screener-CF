@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forklift-candidate-screener",
+  "compatibility_date": "2025-06-01",
+  "main": "./worker/index.ts",
+  "assets": {
+    // The built SPA. The @cloudflare/vite-plugin auto-points this at the client
+    // build output (dist/client), so no "directory" is needed here.
+    "binding": "ASSETS",
+    // Unknown navigation routes fall back to index.html (single-page app).
+    "not_found_handling": "single-page-application",
+    // Force /api/* requests to hit the Worker first instead of the SPA fallback.
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

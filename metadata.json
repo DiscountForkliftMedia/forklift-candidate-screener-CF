@@ -1,0 +1,6 @@
+{
+  "name": "Forklift Candidate Screener",
+  "description": "Analyze resumes for forklift sales roles, grade candidates on green/red flags, and manage interview scheduling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
