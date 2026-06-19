@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "forklift-candidate-screener-cf",
+  "name": "discount-forklift-hiring-screener",
   "compatibility_date": "2025-06-01",
   "main": "./worker/index.ts",
   "assets": {
