@@ -1,36 +1,28 @@
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "forklift-candidate-screener",
-	"compatibility_date": "2025-06-01",
-	"main": "./worker/index.ts",
-	"assets": {
-		// The built SPA. The @cloudflare/vite-plugin auto-points this at the client
-		// build output (dist/client), so no "directory" is needed here.
-		"binding": "ASSETS",
-		// Unknown navigation routes fall back to index.html (single-page app).
-		"not_found_handling": "single-page-application",
-		// Force /api/* requests to hit the Worker first instead of the SPA fallback.
-		"run_worker_first": [
-			"/api/*"
-		]
-	},
-	"d1_databases": [
-		{
-			"binding": "DB",
-			"database_name": "forklift-screener-db",
-			// Local dev (miniflare) ignores this id and uses local storage.
-			// For production: run `wrangler d1 create forklift-screener-db` and paste
-			// the returned database_id here before `npm run deploy`.
-			"database_id": "local-dev-placeholder"
-		},
-		{
-			"binding": "forklift_screener_cf_db",
-			"database_name": "forklift-screener-cf-db",
-			"database_id": "02bc2e8c-bb81-4b81-ad71-7131a61b107c",
-			"remote": true
-		}
-	],
-	"observability": {
-		"enabled": true
-	}
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forklift-candidate-screener-cf",
+  "compatibility_date": "2025-06-01",
+  "main": "./worker/index.ts",
+  "assets": {
+    // The built SPA. The @cloudflare/vite-plugin auto-points this at the client
+    // build output (dist/client), so no "directory" is needed here.
+    "binding": "ASSETS",
+    // Unknown navigation routes fall back to index.html (single-page app).
+    "not_found_handling": "single-page-application",
+    // Force /api/* requests to hit the Worker first instead of the SPA fallback.
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      // The Worker code reads `env.DB`, so the binding must be "DB".
+      // Points at the D1 database Cloudflare provisioned for this project.
+      // Local dev (miniflare) ignores the id and uses local storage.
+      "binding": "DB",
+      "database_name": "forklift-screener-cf-db",
+      "database_id": "02bc2e8c-bb81-4b81-ad71-7131a61b107c"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
 }
