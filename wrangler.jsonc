@@ -12,6 +12,16 @@
     // Force /api/* requests to hit the Worker first instead of the SPA fallback.
     "run_worker_first": ["/api/*"]
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "forklift-screener-db",
+      // Local dev (miniflare) ignores this id and uses local storage.
+      // For production: run `wrangler d1 create forklift-screener-db` and paste
+      // the returned database_id here before `npm run deploy`.
+      "database_id": "local-dev-placeholder"
+    }
+  ],
   "observability": {
     "enabled": true
   }

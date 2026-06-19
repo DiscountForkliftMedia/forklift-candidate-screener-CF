@@ -1,32 +1,86 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-sans: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Space Grotesk", sans-serif;
+  --font-display: "Space Grotesk", "Plus Jakarta Sans", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Brand accents */
+  --color-brand-teal: #2dd4bf;
+  --color-brand-teal-bright: #5eead4;
+  --color-brand-purple: #a855f7;
+  --color-brand-amber: #f5a524;
+  --color-brand-pink: #f472b6;
+  --color-brand-green: #34d399;
+}
+
+html, body, #root {
+  min-height: 100%;
 }
 
 body {
-  background-color: #0B0C10;
-  color: #e2e8f0; /* text-slate-200 */
+  background-color: #05080a;
+  color: #cbd5e1;
+  /* Subtle green / purple / pink ambient glow behind everything */
+  background-image:
+    radial-gradient(950px 520px at 10% -10%, rgba(45, 212, 191, 0.10), transparent 60%),
+    radial-gradient(900px 620px at 92% -4%, rgba(168, 85, 247, 0.12), transparent 55%),
+    radial-gradient(800px 600px at 100% 105%, rgba(236, 72, 153, 0.07), transparent 60%);
+  background-attachment: fixed;
 }
 
-/* Custom styling scrollbar to match elegant dark theme */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+@layer components {
+  /* Base dark panel used across the app */
+  .panel {
+    background-color: rgba(10, 16, 18, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 1rem;
+    backdrop-filter: blur(6px);
+  }
+
+  /* Neon-outlined stat tile */
+  .stat-tile {
+    border-radius: 0.85rem;
+    border-width: 1px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.2));
+  }
+
+  /* Dark form control look (selects, datetime, inputs) */
+  .field {
+    background-color: #0a1012;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    color: #e2e8f0;
+    color-scheme: dark;
+  }
+  .field:focus {
+    outline: none;
+    border-color: var(--color-brand-teal);
+    box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.35);
+  }
 }
 
-::-webkit-scrollbar-track {
-  background: #0B0C10;
+/* Header dotted-grid texture */
+.grid-texture {
+  background-image: radial-gradient(rgba(45, 212, 191, 0.18) 1px, transparent 1px);
+  background-size: 22px 22px;
 }
 
-::-webkit-scrollbar-thumb {
-  background: #2D3139;
-  border-radius: 4px;
-}
+/* Scrollbar */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1f2a2d; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-brand-teal); }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #F59E0B;
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
+.animate-fadeIn { animation: fadeIn 0.25s ease-out; }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slideIn { animation: slideIn 0.3s ease-out; }

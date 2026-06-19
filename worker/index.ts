@@ -1,135 +1,39 @@
 /**
- * Cloudflare Worker — Forklift Candidate Screener API
+ * Cloudflare Worker — Discount Forklift Sales Candidate Screener API.
  *
- * This replaces the old Node/Express server (server.ts). It runs on the
- * Cloudflare Workers runtime (workerd), which is NOT Node.js, so it has zero
- * Node-only dependencies: no express, multer, pdf-parse or the @google/genai
- * SDK. Document text extraction now happens in the browser (see
- * src/utils/extractText.ts) and this Worker only:
+ * Runs on the Cloudflare Workers runtime (workerd). Responsibilities:
+ *   - GET  /api/health                  liveness probe
+ *   - GET  /api/me                      current user (cosmetic; Entra/MSAL-ready seam)
+ *   - GET  /api/stats                   pipeline counts by stage
+ *   - POST /api/analyze-resume          { text } -> OpenAI structured analysis (incl. 0-100 score)
+ *   - GET  /api/candidates[?location=]  list candidates (D1)
+ *   - POST /api/candidates              create from an analysis result
+ *   - GET/PATCH/DELETE /api/candidates/:id
+ *   - POST /api/candidates/:id/touch    record a Call/Text/Email touch
+ *   - GET/POST /api/events[?candidateId=]
+ *   - PATCH/DELETE /api/events/:id
  *
- *   1. GET  /api/health         — liveness probe
- *   2. POST /api/analyze-resume — takes { text } JSON, calls the Gemini REST
- *                                 API, returns the structured analysis JSON.
- *
- * Everything else is served by Cloudflare's static-assets layer (the built
- * Vite SPA), with the SPA fallback configured in wrangler.jsonc.
+ * Document text extraction happens in the browser (src/utils/extractText.ts).
+ * Everything non-API is served by the static-assets layer (the built SPA).
  */
 
-export interface Env {
-  /** Static assets binding (the built Vite SPA in ./dist/client). */
-  ASSETS: { fetch: (request: Request) => Promise<Response> };
-  /** Gemini API key. Set via `wrangler secret put GEMINI_API_KEY` (prod) or .dev.vars (local). */
-  GEMINI_API_KEY: string;
-  /** Optional model override. Defaults to gemini-3.5-flash. */
-  GEMINI_MODEL?: string;
-}
-
-const MAX_RESUME_CHARS = 200_000;
-
-// Mirrors the original prompt from server.ts verbatim so grading behaviour is unchanged.
-const SYSTEM_INSTRUCTION =
-  `You are an expert sales recruiter and senior hiring consultant specialized in high-ticket industrial equipment, heavy machinery, forklift, and B2B material handling equipment sales.
-        Your job is to thoroughly analyze the provided candidate resume for a high-intensity Sales Representative/Sales Manager role at "Discount Forklift" and grade the applicant based on rigorous real-world metrics.
-
-        Discount Forklift is looking for high-grit, results-oriented, driven sales professionals who can cold call, prospect, handle complex B2B material handling queries, build long-term relationships, follow up relentlessly, and close high-ticket machinery deals.
-
-        Evaluate the applicant strictly on the following values:
-        - Outbound Prospecting / Cold Calling: Have they done proactive sales, door-to-door, field B2B sales, or cold outreach? (Huge green flag)
-        - Industrial/Automotive/Machinery Savvy: Do they have experience in heavy equipment rentals, car dealerships, building materials, construction, material handling, or logistics? (Green flag)
-        - Performance Metrics & Numbers: Do they list concrete percentages, sales targets, quotas met, growth rates, etc.? (Massive green flag)
-        - Grit & Work Ethic: Do they have stamina, competitiveness, or history of commission-driven success?
-        - Job Longevity: Do they stay with employers for at least 1.5 - 2+ years? Or are they job-hoppers changing positions every few months without explanation? (Job hopping is a prominent red flag).
-        - Administrative vs Proactive Sales: Are they merely doing customer service, reactive retail cash-register duty, or administrative support? (Red flag if they claim it is proactive B2B sales).
-
-        Provide your grading objectively:
-        - Grade A+/A/A-: Clear high-performing B2B sales professional with heavy/medium equipment or direct relevant outbound experience, solid metrics. Great fit.
-        - Grade B+/B/B-: Strong potential, maybe lack industrial specific experience but show high grit, sales numbers, and direct B2B sales skills. Worth interviewing.
-        - Grade C+/C/C-: Marginally qualified, heavy customer service background, or lacking outbound/sales experience but possesses transferable skills.
-        - Grade D/F: Unqualified. No sales focus, job hopper with extremely short stints, or complete mismatch in career path.
-
-        Come up with detailed, targeted, ultra-specific feedback, GREEN FLAGS, RED FLAGS, and interview questions divided into:
-        1. Over-the-Phone Interview Stage: Probing general background, investigating red flags like job hopped intervals, cold-calling willingness, and testing initial tone. (3-4 questions)
-        2. In-Person Interview Stage: Probing physical presentation potential, heavy equipment negotiation, closing style, and a forklift-sales-mock-scenario/roleplay. (3-4 questions)`;
-
-// Gemini REST responseSchema (OpenAPI subset). Identical fields/required to the
-// original @google/genai schema — Type.STRING etc. map to these uppercase strings.
-const RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    fullName: {
-      type: "STRING",
-      description:
-        "Full name of the candidate, e.g., 'John Doe'. Fallback to 'Unknown Applicant' if not found.",
-    },
-    email: { type: "STRING", description: "Email address. Return empty string if not found." },
-    phone: { type: "STRING", description: "Phone number. Return empty string if not found." },
-    location: {
-      type: "STRING",
-      description: "City and state, or location details. Return empty string if not found.",
-    },
-    overallGrade: {
-      type: "STRING",
-      description: "The assigned letter grade (A+, A, A-, B+, B, B-, C+, C, C-, D, or F).",
-    },
-    gradeExplanation: {
-      type: "STRING",
-      description: "Brief rationale explaining why they got this overall grade.",
-    },
-    isQualified: {
-      type: "BOOLEAN",
-      description: "True if the candidate is Grade B- or above, False if marginally or unqualified.",
-    },
-    keySkills: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-      description: "List of 4-6 most prominent skills extracted from the resume.",
-    },
-    experienceSummary: {
-      type: "STRING",
-      description:
-        "A summary of their professional work history, highlighting sales positions or industrial roles.",
-    },
-    greenFlags: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-      description:
-        "List of green flags identifying why they are a strong candidate for forklift sales.",
-    },
-    redFlags: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-      description:
-        "List of red flags or concerns (e.g. job hopping, no B2B metric evidence, reactive customer service, etc.).",
-    },
-    phoneInterviewQuestions: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-      description:
-        "3-4 custom targeted over-the-phone screening questions tailored to this candidate's history and potential weaknesses/background.",
-    },
-    inPersonInterviewQuestions: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-      description:
-        "3-4 advanced situational/behavioral B2B sales interview questions for the in-person meeting.",
-    },
-  },
-  required: [
-    "fullName",
-    "email",
-    "phone",
-    "location",
-    "overallGrade",
-    "gradeExplanation",
-    "isQualified",
-    "keySkills",
-    "experienceSummary",
-    "greenFlags",
-    "redFlags",
-    "phoneInterviewQuestions",
-    "inPersonInterviewQuestions",
-  ],
-};
+import type { Candidate, CurrentUser, InterviewEvent } from "../src/types";
+import type { Env } from "./types";
+import { initDb } from "./schema";
+import { analyzeResumeText } from "./openai";
+import {
+  deleteCandidate,
+  deleteEvent,
+  getCandidate,
+  getStats,
+  insertCandidate,
+  insertEvent,
+  listCandidates,
+  listEvents,
+  touchCandidate,
+  updateCandidate,
+  updateEvent,
+} from "./db";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -138,156 +42,211 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-async function analyzeResume(request: Request, env: Env): Promise<Response> {
-  if (request.method !== "POST") {
-    return json({ error: "Method not allowed. Use POST." }, 405);
-  }
-
-  // 1. Read the extracted resume text (extraction happens client-side now).
-  let text = "";
+async function readJson<T>(request: Request): Promise<T | null> {
   try {
-    const body = (await request.json()) as { text?: string };
-    text = typeof body?.text === "string" ? body.text : "";
+    return (await request.json()) as T;
   } catch {
-    return json({ error: "Invalid request body. Expected JSON with a 'text' field." }, 400);
+    return null;
+  }
+}
+
+/**
+ * Current authenticated user. Cosmetic for now — returns a fixed Sales Manager.
+ * TODO (Entra/MSAL): validate the incoming token here (e.g. the
+ * `Cf-Access-Jwt-Assertion` header from Cloudflare Access, or an
+ * `Authorization: Bearer` MSAL token) and derive email/role/locations from it.
+ */
+function getCurrentUser(_request: Request): CurrentUser {
+  return {
+    email: "matt@discountforklift.us",
+    name: "Matt R.",
+    role: "Sales Manager",
+    locations: ["Denver"],
+  };
+}
+
+async function handleApi(request: Request, env: Env, pathname: string): Promise<Response> {
+  const method = request.method;
+  const segments = pathname.split("/").filter(Boolean); // e.g. ["api","candidates","abc"]
+  const url = new URL(request.url);
+
+  // /api/health
+  if (segments.length === 2 && segments[1] === "health") {
+    return json({ status: "ok", time: new Date().toISOString() });
   }
 
-  if (!text || text.trim().length === 0) {
-    return json(
-      { error: "The uploaded resume seems to be empty or has no readable text content." },
-      422,
-    );
+  // /api/me
+  if (segments.length === 2 && segments[1] === "me" && method === "GET") {
+    return json(getCurrentUser(request));
   }
 
-  // Guard against oversized payloads blowing past model/context limits.
-  if (text.length > MAX_RESUME_CHARS) {
-    text = text.slice(0, MAX_RESUME_CHARS);
+  // Everything below touches D1.
+  await initDb(env);
+
+  // /api/stats
+  if (segments.length === 2 && segments[1] === "stats" && method === "GET") {
+    return json(await getStats(env));
   }
 
-  // 2. Verify the Gemini API key is configured.
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-    return json(
-      {
-        error: "Gemini API is not configured.",
-        details:
-          "Set GEMINI_API_KEY via `wrangler secret put GEMINI_API_KEY` (production) or in .dev.vars (local dev).",
-      },
-      501,
-    );
+  // /api/analyze-resume
+  if (segments.length === 2 && segments[1] === "analyze-resume") {
+    if (method !== "POST") return json({ error: "Method not allowed. Use POST." }, 405);
+    const body = await readJson<{ text?: string }>(request);
+    if (!body || typeof body.text !== "string") {
+      return json({ error: "Invalid request body. Expected JSON with a 'text' field." }, 400);
+    }
+    const outcome = await analyzeResumeText(body.text, env);
+    if (outcome.ok && outcome.analysis) {
+      return json(outcome.analysis);
+    }
+    return json({ error: outcome.error, details: outcome.details }, outcome.status ?? 502);
   }
 
-  const model = env.GEMINI_MODEL || "gemini-3.5-flash";
+  // /api/candidates and /api/candidates/:id[/touch]
+  if (segments[1] === "candidates") {
+    // Collection
+    if (segments.length === 2) {
+      if (method === "GET") {
+        const loc = url.searchParams.get("location");
+        const locations = loc && loc !== "all" ? [loc] : undefined;
+        return json(await listCandidates(env, locations));
+      }
+      if (method === "POST") {
+        return createCandidate(request, env);
+      }
+      return json({ error: "Method not allowed." }, 405);
+    }
 
-  // 3. Call the Gemini REST API directly (no SDK — keeps the Worker dependency-free).
-  let geminiRes: Response;
-  try {
-    geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-          contents: [
-            { role: "user", parts: [{ text: `Here is the candidate's resume content:\n\n${text}` }] },
-          ],
-          generationConfig: {
-            temperature: 0.2, // low temp for accurate extraction
-            responseMimeType: "application/json",
-            responseSchema: RESPONSE_SCHEMA,
-          },
-        }),
-      },
-    );
-  } catch (networkErr: any) {
-    return json(
-      {
-        error: "Could not reach the Gemini API.",
-        details: networkErr?.message || String(networkErr),
-      },
-      502,
-    );
+    const id = decodeURIComponent(segments[2]);
+
+    // /api/candidates/:id/touch
+    if (segments.length === 4 && segments[3] === "touch" && method === "POST") {
+      const updated = await touchCandidate(env, id, new Date().toISOString());
+      if (!updated) return json({ error: "Candidate not found." }, 404);
+      return json(updated);
+    }
+
+    // /api/candidates/:id
+    if (segments.length === 3) {
+      if (method === "GET") {
+        const c = await getCandidate(env, id);
+        return c ? json(c) : json({ error: "Candidate not found." }, 404);
+      }
+      if (method === "PATCH") {
+        const patch = await readJson<Record<string, unknown>>(request);
+        if (!patch) return json({ error: "Invalid request body." }, 400);
+        const updated = await updateCandidate(env, id, patch);
+        return updated ? json(updated) : json({ error: "Candidate not found." }, 404);
+      }
+      if (method === "DELETE") {
+        await deleteCandidate(env, id);
+        return json({ ok: true });
+      }
+      return json({ error: "Method not allowed." }, 405);
+    }
   }
 
-  if (!geminiRes.ok) {
-    const errText = await geminiRes.text().catch(() => "");
-    console.error("Gemini API error:", geminiRes.status, errText);
-    return json(
-      {
-        error: "AI analysis failed.",
-        details: `Gemini API returned ${geminiRes.status}. ${errText.slice(0, 500)}`,
-      },
-      502,
-    );
+  // /api/events and /api/events/:id
+  if (segments[1] === "events") {
+    if (segments.length === 2) {
+      if (method === "GET") {
+        const candidateId = url.searchParams.get("candidateId") || undefined;
+        return json(await listEvents(env, candidateId));
+      }
+      if (method === "POST") {
+        return createEvent(request, env);
+      }
+      return json({ error: "Method not allowed." }, 405);
+    }
+    const id = decodeURIComponent(segments[2]);
+    if (segments.length === 3) {
+      if (method === "PATCH") {
+        const patch = await readJson<{ completed?: boolean; notes?: string; datetime?: string }>(request);
+        if (!patch) return json({ error: "Invalid request body." }, 400);
+        const updated = await updateEvent(env, id, patch);
+        return updated ? json(updated) : json({ error: "Event not found." }, 404);
+      }
+      if (method === "DELETE") {
+        await deleteEvent(env, id);
+        return json({ ok: true });
+      }
+      return json({ error: "Method not allowed." }, 405);
+    }
   }
 
-  // 4. Extract and parse the model's JSON response.
-  let data: any;
-  try {
-    data = await geminiRes.json();
-  } catch {
-    return json({ error: "Received an unreadable response from the Gemini model." }, 502);
+  return json({ error: "Not found." }, 404);
+}
+
+async function createCandidate(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<Partial<Candidate> & { score?: number }>(request);
+  if (!body || !body.fullName) {
+    return json({ error: "Invalid candidate payload (missing fullName)." }, 400);
   }
 
-  const candidate = data?.candidates?.[0];
-  const responseText: string | undefined = candidate?.content?.parts
-    ?.map((p: any) => p?.text || "")
-    .join("")
-    .trim();
+  const now = new Date().toISOString();
+  const candidate: Candidate = {
+    id: crypto.randomUUID(),
+    fullName: body.fullName,
+    email: body.email ?? "",
+    phone: body.phone ?? "",
+    // location is the branch/office, defaulting to the upload location.
+    location: body.location || "Denver",
+    score: Math.max(0, Math.min(100, Math.round(Number(body.score ?? 0)))),
+    overallGrade: body.overallGrade ?? "",
+    gradeExplanation: body.gradeExplanation ?? "",
+    isQualified: Boolean(body.isQualified),
+    keySkills: Array.isArray(body.keySkills) ? body.keySkills : [],
+    experienceSummary: body.experienceSummary ?? "",
+    greenFlags: Array.isArray(body.greenFlags) ? body.greenFlags : [],
+    redFlags: Array.isArray(body.redFlags) ? body.redFlags : [],
+    phoneInterviewQuestions: Array.isArray(body.phoneInterviewQuestions) ? body.phoneInterviewQuestions : [],
+    inPersonInterviewQuestions: Array.isArray(body.inPersonInterviewQuestions)
+      ? body.inPersonInterviewQuestions
+      : [],
+    stage: "Resume Screen",
+    status: "Active",
+    ownerManager: body.ownerManager || "Unassigned",
+    fileName: body.fileName ?? "",
+    fileSize: Number(body.fileSize ?? 0),
+    notes: body.notes ?? "",
+    lastTouched: null,
+    dateAdded: now,
+  };
 
-  if (!responseText) {
-    // Surface safety blocks / empty completions clearly.
-    const finishReason = candidate?.finishReason || data?.promptFeedback?.blockReason;
-    return json(
-      {
-        error: "Received empty response from Gemini model.",
-        details: finishReason ? `Finish reason: ${finishReason}` : undefined,
-      },
-      502,
-    );
-  }
+  await insertCandidate(env, candidate);
+  return json(candidate, 201);
+}
 
-  try {
-    return json(JSON.parse(responseText));
-  } catch (parseErr: any) {
-    console.error("Failed to parse Gemini JSON:", parseErr, responseText.slice(0, 500));
-    return json(
-      { error: "The AI returned malformed analysis data.", details: parseErr?.message },
-      502,
-    );
+async function createEvent(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<Partial<InterviewEvent>>(request);
+  if (!body || !body.candidateId || !body.datetime) {
+    return json({ error: "Invalid event payload (candidateId and datetime required)." }, 400);
   }
+  const event: InterviewEvent = {
+    id: crypto.randomUUID(),
+    candidateId: body.candidateId,
+    candidateName: body.candidateName ?? "",
+    type: body.type === "In-Person" ? "In-Person" : "Phone",
+    datetime: body.datetime,
+    durationMinutes: Number(body.durationMinutes ?? 30),
+    notes: body.notes ?? "",
+    completed: Boolean(body.completed),
+  };
+  await insertEvent(env, event);
+  return json(event, 201);
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/health") {
-      return json({ status: "ok", time: new Date().toISOString() });
-    }
-
-    if (url.pathname === "/api/analyze-resume") {
-      try {
-        return await analyzeResume(request, env);
-      } catch (err: any) {
-        console.error("Resume Analysis Worker Error:", err);
-        return json(
-          {
-            error: "An error occurred during resume processing or AI analysis.",
-            details: err?.message || String(err),
-          },
-          500,
-        );
-      }
-    }
-
-    // Any unknown /api/* route → 404 JSON (don't fall through to the SPA shell).
     if (url.pathname.startsWith("/api/")) {
-      return json({ error: "Not found." }, 404);
+      try {
+        return await handleApi(request, env, url.pathname);
+      } catch (err: any) {
+        console.error("Worker API error:", err);
+        return json({ error: "Internal server error.", details: err?.message || String(err) }, 500);
+      }
     }
 
     // Everything else: serve the built SPA / static assets.

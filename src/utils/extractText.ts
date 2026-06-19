@@ -55,6 +55,15 @@ export async function extractTextFromFile(file: File): Promise<string> {
     file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     name.endsWith(".docx");
   const isTxt = file.type === "text/plain" || name.endsWith(".txt");
+  const isLegacyDoc = !isDocx && name.endsWith(".doc");
+
+  // The legacy binary Word format (.doc, Word 97–2003) cannot be parsed reliably
+  // in the browser. Ask the user to convert rather than failing cryptically.
+  if (isLegacyDoc) {
+    throw new Error(
+      "Legacy .doc files aren't supported. Please re-save as .docx or PDF and upload again.",
+    );
+  }
 
   try {
     if (isPdf) {
